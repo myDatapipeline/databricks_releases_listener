@@ -23,3 +23,17 @@ Each repo deploys inside itself (so it uses its own Databricks creds & DABs).
 wait-for-completion: true makes central block until each repo finishes per env.
 
 start/stop let you run partial chains (e.g., QA→PROD hotfix). 
+
+
+
+##### Understanding the Workflow ,
+<p> Human-readable name shown in the Actions UI. </p>
+name: Promote (QA/UAT/PROD) with checkboxes 
+
+on:
+  repository_dispatch:
+    types: [promote_request]  # creates a run you'll see in Actions list
+
+<p> The workflow auto-starts when another repo (your app repo A/B/C) calls the GitHub API repository_dispatch with event_type: "promote_request".
+
+The app repo includes client_payload with things like repo_full_name and sha. Those land in github.event.client_payload.* here.</p>

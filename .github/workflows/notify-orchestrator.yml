@@ -1,0 +1,125 @@
+name: Promote (QA/UAT/PROD) with checkboxes
+
+on:
+  repository_dispatch:
+    types: [promote_request]  # creates a run you'll see in Actions list
+  workflow_dispatch:
+    inputs:
+      repo_full_name:
+        description: "owner/repo (auto-filled if coming from dispatch)"
+        required: false
+      sha:
+        description: "Commit SHA (auto-filled if coming from dispatch)"
+        required: false
+      deploy_qa:
+        type: boolean
+        description: "Deploy to QA"
+        required: true
+        default: true
+      deploy_uat:
+        type: boolean
+        description: "Deploy to UAT"
+        required: true
+        default: true
+      deploy_prod:
+        type: boolean
+        description: "Deploy to PROD"
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  ORG_REPO_PAT: ${{ secrets.ORG_REPO_PAT }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      repo: ${{ steps.o.outputs.repo }}
+      sha: ${{ steps.o.outputs.sha }}
+      qa: ${{ steps.o.outputs.qa }}
+      uat: ${{ steps.o.outputs.uat }}
+      prod: ${{ steps.o.outputs.prod }}
+    steps:
+      - id: o
+        run: |
+          repo="${{ github.event.client_payload.repo_full_name || inputs.repo_full_name }}"
+          sha="${{ github.event.client_payload.sha || inputs.sha }}"
+          qa="${{ inputs.deploy_qa }}"
+          uat="${{ inputs.deploy_uat }}"
+          prod="${{ inputs.deploy_prod }}"
+          echo "repo=$repo" >> $GITHUB_OUTPUT
+          echo "sha=$sha" >> $GITHUB_OUTPUT
+          echo "qa=$qa" >> $GITHUB_OUTPUT
+          echo "uat=$uat" >> $GITHUB_OUTPUT
+          echo "prod=$prod" >> $GITHUB_OUTPUT
+
+  qa:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.qa == 'true' }}
+    runs-on: ubuntu-latest
+    environment: QA    # add required reviewers for gate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve.outputs.repo }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          token: ${{ env.ORG_REPO_PAT }}
+
+      - name: Install Databricks CLI
+        run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+      - name: Auth (QA)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: echo "Auth ok"
+
+      - name: Validate QA
+        run: databricks bundle validate -t qa
+      - name: Deploy QA
+        run: databricks bundle deploy -t qa
+
+  uat:
+    needs: [resolve, qa]
+    if: ${{ needs.resolve.outputs.uat == 'true' && (needs.qa.result == 'success' || needs.resolve.outputs.qa == 'false') }}
+    runs-on: ubuntu-latest
+    environment: UAT
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve.outputs.repo }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          token: ${{ env.ORG_REPO_PAT }}
+      - run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+      - name: Auth (UAT)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: echo "Auth ok"
+      - run: databricks bundle validate -t uat
+      - run: databricks bundle deploy -t uat
+
+  prod:
+    needs: [resolve, uat, qa]
+    if: ${{needs.resolve.outputs.prod == 'true' && 
+            (needs.uat.result == 'success' || needs.resolve.outputs.uat == 'false') && 
+            (needs.qa.result == 'success'  || needs.resolve.outputs.qa  == 'false') }}
+    runs-on: ubuntu-latest
+    environment: PROD
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve.outputs.repo }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          token: ${{ env.ORG_REPO_PAT }}
+      - run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+      - name: Auth (PROD)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: echo "Auth ok"
+      - run: databricks bundle validate -t prod
+      - run: databricks bundle deploy -t prod
