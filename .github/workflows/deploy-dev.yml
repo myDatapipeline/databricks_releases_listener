@@ -1,1 +1,39 @@
+name: Orchestrate DEV (auto on dev)
+
+on:
+  repository_dispatch:
+    types: [deploy_dev]
+
+permissions:
+  contents: read
+
+env:
+  ORG_REPO_PAT: ${{ secrets.ORG_REPO_PAT }}
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    environment: DEV
+    steps:
+      - name: Checkout target repo@sha
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repo_full_name }}
+          ref: ${{ github.event.client_payload.sha }}
+          token: ${{ env.ORG_REPO_PAT }}
+
+      - name: Install Databricks CLI
+        run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+      - name: Auth (DEV)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: echo "Auth ready"
+
+      - name: Validate
+        run: databricks bundle validate -t dev
+
+      - name: Deploy DEV
+        run: databricks bundle deploy -t dev
 
