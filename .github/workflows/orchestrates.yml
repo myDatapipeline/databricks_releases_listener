@@ -2,7 +2,7 @@ name: Promote (QA/UAT/PROD) with checkboxes
 
 on:
   repository_dispatch:
-    types: [promote_request]  # creates a run you'll see in Actions list
+    types: [promote_request,]  # creates a run you'll see in Actions list
   workflow_dispatch:
     inputs:
       repo_full_name:
@@ -11,6 +11,11 @@ on:
       sha:
         description: "Commit SHA (auto-filled if coming from dispatch)"
         required: false
+      deploy_dev:
+        type: boolean
+        description: "Deploy to DEV"
+        required: true
+        default: true
       deploy_qa:
         type: boolean
         description: "Deploy to QA"
@@ -39,6 +44,7 @@ jobs:
     outputs:
       repo: ${{ steps.o.outputs.repo }}
       sha: ${{ steps.o.outputs.sha }}
+      dev: ${{ steps.o.outputs.qa }}
       qa: ${{ steps.o.outputs.qa }}
       uat: ${{ steps.o.outputs.uat }}
       prod: ${{ steps.o.outputs.prod }}
@@ -52,11 +58,44 @@ jobs:
           prod="${{ inputs.deploy_prod }}"
           echo "repo=$repo" >> $GITHUB_OUTPUT
           echo "sha=$sha" >> $GITHUB_OUTPUT
+          echo "dev=$dev" >> $GITHUB_OUTPUT
           echo "qa=$qa" >> $GITHUB_OUTPUT
           echo "uat=$uat" >> $GITHUB_OUTPUT
           echo "prod=$prod" >> $GITHUB_OUTPUT
 
-  qa:
+dev: 
+    needs: resolve
+    if: ${{ needs.resolve.outputs.mode == 'true' }}
+    runs-on: ubuntu-latest
+    environment: DEV   # Use GitHub Environment "DEV" for approvals + secrets
+    steps:
+      - name: Checkout target app repo at exact commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.prepare.outputs.repo_full_name }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ env.ORG_REPO_PAT }}
+
+      - name: Install Databricks CLI (bundles)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          databricks --version
+
+      - name: Configure Databricks auth (DEV)
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          # CLI v0+ uses env vars; no profile file needed
+          echo "Auth ready for DEV"
+
+      - name: Validate bundle (DEV)
+        run: databricks bundle validate -t dev
+
+      - name: Deploy bundle to DEV
+        run: databricks bundle deploy -t dev
+
+qa: 
     needs: resolve
     if: ${{ needs.resolve.outputs.qa == 'true' }}
     runs-on: ubuntu-latest
@@ -82,7 +121,7 @@ jobs:
       - name: Deploy QA
         run: databricks bundle deploy -t qa
 
-  uat:
+uat: 
     needs: [resolve, qa]
     if: ${{ needs.resolve.outputs.uat == 'true' && (needs.qa.result == 'success' || needs.resolve.outputs.qa == 'false') }}
     runs-on: ubuntu-latest
@@ -101,8 +140,8 @@ jobs:
         run: echo "Auth ok"
       - run: databricks bundle validate -t uat
       - run: databricks bundle deploy -t uat
-
-  prod:
+      
+prod:
     needs: [resolve, uat, qa]
     if: ${{needs.resolve.outputs.prod == 'true' && 
             (needs.uat.result == 'success' || needs.resolve.outputs.uat == 'false') && 
