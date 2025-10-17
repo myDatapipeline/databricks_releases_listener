@@ -1,4 +1,4 @@
-name: Promote (QA/UAT/PROD) with checkboxes
+name: Promote (DEV/QA/UAT/PROD) with checkboxes
 
 on:
   repository_dispatch:
@@ -62,38 +62,38 @@ jobs:
           echo "qa=$qa" >> $GITHUB_OUTPUT
           echo "uat=$uat" >> $GITHUB_OUTPUT
           echo "prod=$prod" >> $GITHUB_OUTPUT
+          
+dev:
+  needs: resolve
+  if: ${{ needs.resolve.outputs.dev == 'true' }}
+  runs-on: ubuntu-latest
+  environment: DEV   # Use GitHub Environment "DEV" for approvals + secrets
+  steps:
+    - name: Checkout target app repo at exact commit
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ needs.prepare.outputs.repo_full_name }}
+        ref: ${{ needs.prepare.outputs.sha }}
+        token: ${{ env.ORG_REPO_PAT }}
 
-dev: 
-    needs: resolve
-    if: ${{ needs.resolve.outputs.mode == 'true' }}
-    runs-on: ubuntu-latest
-    environment: DEV   # Use GitHub Environment "DEV" for approvals + secrets
-    steps:
-      - name: Checkout target app repo at exact commit
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ needs.prepare.outputs.repo_full_name }}
-          ref: ${{ needs.prepare.outputs.sha }}
-          token: ${{ env.ORG_REPO_PAT }}
+    - name: Install Databricks CLI (bundles)
+      run: |
+        curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+        databricks --version
 
-      - name: Install Databricks CLI (bundles)
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
-          databricks --version
+    - name: Configure Databricks auth (DEV)
+      env:
+        DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+        DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      run: |
+        # CLI v0+ uses env vars; no profile file needed
+        echo "Auth ready for DEV"
 
-      - name: Configure Databricks auth (DEV)
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: |
-          # CLI v0+ uses env vars; no profile file needed
-          echo "Auth ready for DEV"
+    - name: Validate bundle (DEV)
+      run: databricks bundle validate -t dev
 
-      - name: Validate bundle (DEV)
-        run: databricks bundle validate -t dev
-
-      - name: Deploy bundle to DEV
-        run: databricks bundle deploy -t dev
+    - name: Deploy bundle to DEV
+      run: databricks bundle deploy -t dev
 
 qa: 
     needs: resolve
