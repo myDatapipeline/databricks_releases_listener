@@ -2,7 +2,7 @@ name: Promote (DEV/QA/UAT/PROD) with checkboxes
 
 on:
   repository_dispatch:
-    types: [promote_request,]  # creates a run you'll see in Actions list
+    types: [promote_request]   # from app repos
   workflow_dispatch:
     inputs:
       repo_full_name:
@@ -33,10 +33,15 @@ on:
         default: false
 
 permissions:
+  id-token: write         # REQUIRED for GitHub OIDC
   contents: read
 
 env:
   ORG_REPO_PAT: ${{ secrets.ORG_REPO_PAT }}
+
+concurrency:
+  group: promote-${{ inputs.repo_full_name || github.event.client_payload.repo_full_name }}-${{ inputs.sha || github.event.client_payload.sha }}
+  cancel-in-progress: false
 
 jobs:
   resolve:
@@ -44,15 +49,16 @@ jobs:
     outputs:
       repo: ${{ steps.o.outputs.repo }}
       sha: ${{ steps.o.outputs.sha }}
-      dev: ${{ steps.o.outputs.qa }}
-      qa: ${{ steps.o.outputs.qa }}
+      dev: ${{ steps.o.outputs.dev }}
+      qa:  ${{ steps.o.outputs.qa }}
       uat: ${{ steps.o.outputs.uat }}
-      prod: ${{ steps.o.outputs.prod }}
+      prod:${{ steps.o.outputs.prod }}
     steps:
       - id: o
         run: |
           repo="${{ github.event.client_payload.repo_full_name || inputs.repo_full_name }}"
           sha="${{ github.event.client_payload.sha || inputs.sha }}"
+          dev="${{ inputs.deploy_dev }}"
           qa="${{ inputs.deploy_qa }}"
           uat="${{ inputs.deploy_uat }}"
           prod="${{ inputs.deploy_prod }}"
@@ -62,44 +68,55 @@ jobs:
           echo "qa=$qa" >> $GITHUB_OUTPUT
           echo "uat=$uat" >> $GITHUB_OUTPUT
           echo "prod=$prod" >> $GITHUB_OUTPUT
-          
-dev:
-  needs: resolve
-  if: ${{ needs.resolve.outputs.dev == 'true' }}
-  runs-on: ubuntu-latest
-  environment: DEV   # Use GitHub Environment "DEV" for approvals + secrets
-  steps:
-    - name: Checkout target app repo at exact commit
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ needs.prepare.outputs.repo_full_name }}
-        ref: ${{ needs.prepare.outputs.sha }}
-        token: ${{ env.ORG_REPO_PAT }}
 
-    - name: Install Databricks CLI (bundles)
-      run: |
-        curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
-        databricks --version
+  dev:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.dev == 'true' }}
+    runs-on: ubuntu-latest
+    environment: DEV
+    steps:
+      - name: Checkout target repo@sha
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve.outputs.repo }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          token: ${{ env.ORG_REPO_PAT }}
 
-    - name: Configure Databricks auth (DEV)
-      env:
-        DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-        DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-      run: |
-        # CLI v0+ uses env vars; no profile file needed
-        echo "Auth ready for DEV"
+      - name: Install Databricks CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          databricks -v
 
-    - name: Validate bundle (DEV)
-      run: databricks bundle validate -t dev
+      # Native GitHub→Databricks OIDC (no PAT/az login)
+      - name: Verify auth (DEV)
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: |
+          databricks current-user || true
+          databricks workspace ls / || true
+          echo "Auth ready for DEV"
 
-    - name: Deploy bundle to DEV
-      run: databricks bundle deploy -t dev
+      - name: Validate bundle (DEV)
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: databricks bundle validate -t dev
 
-qa: 
+      - name: Deploy bundle to DEV
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: databricks bundle deploy -t dev
+
+  qa:
     needs: resolve
     if: ${{ needs.resolve.outputs.qa == 'true' }}
     runs-on: ubuntu-latest
-    environment: QA    # add required reviewers for gate
+    environment: QA
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,20 +125,32 @@ qa:
           token: ${{ env.ORG_REPO_PAT }}
 
       - name: Install Databricks CLI
-        run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          databricks -v
 
       - name: Auth (QA)
         env:
+          DATABRICKS_AUTH_TYPE: github-oidc
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: echo "Auth ok"
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: echo "Auth ok (QA)"
 
       - name: Validate QA
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
         run: databricks bundle validate -t qa
+
       - name: Deploy QA
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
         run: databricks bundle deploy -t qa
 
-uat: 
+  uat:
     needs: [resolve, qa]
     if: ${{ needs.resolve.outputs.uat == 'true' && (needs.qa.result == 'success' || needs.resolve.outputs.qa == 'false') }}
     runs-on: ubuntu-latest
@@ -132,20 +161,38 @@ uat:
           repository: ${{ needs.resolve.outputs.repo }}
           ref: ${{ needs.resolve.outputs.sha }}
           token: ${{ env.ORG_REPO_PAT }}
-      - run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+      - name: Install Databricks CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          databricks -v
+
       - name: Auth (UAT)
         env:
+          DATABRICKS_AUTH_TYPE: github-oidc
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: echo "Auth ok"
-      - run: databricks bundle validate -t uat
-      - run: databricks bundle deploy -t uat
-      
-prod:
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: echo "Auth ok (UAT)"
+
+      - name: Validate UAT
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: databricks bundle validate -t uat
+
+      - name: Deploy UAT
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: databricks bundle deploy -t uat
+
+  prod:
     needs: [resolve, uat, qa]
-    if: ${{needs.resolve.outputs.prod == 'true' && 
-            (needs.uat.result == 'success' || needs.resolve.outputs.uat == 'false') && 
-            (needs.qa.result == 'success'  || needs.resolve.outputs.qa  == 'false') }}
+    if: ${{ needs.resolve.outputs.prod == 'true' &&
+            (needs.uat.result == 'success' || needs.resolve.outputs.uat == 'false') &&
+            (needs.qa.result  == 'success' || needs.resolve.outputs.qa  == 'false') }}
     runs-on: ubuntu-latest
     environment: PROD
     steps:
@@ -154,11 +201,29 @@ prod:
           repository: ${{ needs.resolve.outputs.repo }}
           ref: ${{ needs.resolve.outputs.sha }}
           token: ${{ env.ORG_REPO_PAT }}
-      - run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+      - name: Install Databricks CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          databricks -v
+
       - name: Auth (PROD)
         env:
+          DATABRICKS_AUTH_TYPE: github-oidc
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: echo "Auth ok"
-      - run: databricks bundle validate -t prod
-      - run: databricks bundle deploy -t prod
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: echo "Auth ok (PROD)"
+
+      - name: Validate PROD
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: databricks bundle validate -t prod
+
+      - name: Deploy PROD
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_ID }}
+        run: databricks bundle deploy -t prod
